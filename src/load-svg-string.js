@@ -187,6 +187,38 @@ const findLargestStrokeWidth = rootNode => {
     return largestStrokeWidth;
 };
 
+const measureSvgBBox = svgText => new Promise((resolve, reject) => {
+    // Append the SVG dom to the document.
+    // This allows us to use `getBBox` on the page,
+    // which returns the full bounding-box of all drawn SVG
+    // elements, similar to how Scratch 2.0 did measurement.
+    const iframeElement = document.createElement('iframe');
+    iframeElement.setAttribute('sandbox', 'allow-same-origin');
+    iframeElement.setAttribute('style', 'position: absolute; top: -100000px');
+
+    try {
+        // eslint-disable-next-line no-undef
+        const svgBlob = new Blob([svgText], {type: 'image/svg+xml'});
+        const iframeContent = URL.createObjectURL(svgBlob);
+        let timeout = null;
+        iframeElement.onload = () => {
+            clearTimeout(timeout);
+            const bbox = iframeElement.getSVGDocument().children[0].getBBox();
+            resolve(bbox);
+            document.body.removeChild(iframeElement);
+        };
+        iframeElement.src = iframeContent;
+        document.body.appendChild(iframeElement);
+        timeout = setTimeout(() => {
+            reject(new Error('Timed out loading SVG'));
+            document.body.removeChild(iframeElement);
+        }, 30 * 1000);
+    } catch (e) {
+        reject(e);
+        document.body.removeChild(iframeElement);
+    }
+});
+
 /**
  * Transform the measurements of the SVG.
  * In Scratch 2.0, SVGs are drawn without respect to the width,
@@ -201,13 +233,9 @@ const findLargestStrokeWidth = rootNode => {
  * or inflating them and then measuring a canvas. But this seems to be
  * a natural and performant way.
  * @param {SVGSVGElement} svgTag the SVG tag to apply the transformation to
+ * @returns {Promise} - a promise which resolves after this._svgTag has proper measurements
  */
 const transformMeasurements = svgTag => {
-    // Append the SVG dom to the document.
-    // This allows us to use `getBBox` on the page,
-    // which returns the full bounding-box of all drawn SVG
-    // elements, similar to how Scratch 2.0 did measurement.
-    const svgSpot = document.createElement('span');
     // Since we're adding user-provided SVG to document.body,
     // sanitizing is required. This should not affect bounding box calculation.
     // outerHTML is attribute of Element (and not HTMLElement), so use it instead of
@@ -222,40 +250,30 @@ const transformMeasurements = svgTag => {
         // Allow data URI in image tags (e.g. SVGs converted from bitmap)
         ADD_DATA_URI_TAGS: ['image']
     });
-    let bbox;
-    try {
-        // Insert sanitized value.
-        svgSpot.innerHTML = sanitizedValue;
-        document.body.appendChild(svgSpot);
-        // Take the bounding box. We have to get elements via svgSpot
-        // because we added it via innerHTML.
-        bbox = svgSpot.children[0].getBBox();
-    } finally {
-        // Always destroy the element, even if, for example, getBBox throws.
-        document.body.removeChild(svgSpot);
-    }
 
-    // Enlarge the bbox from the largest found stroke width
-    // This may have false-positives, but at least the bbox will always
-    // contain the full graphic including strokes.
-    // If the width or height is zero however, don't enlarge since
-    // they won't have a stroke width that needs to be enlarged.
-    let halfStrokeWidth;
-    if (bbox.width === 0 || bbox.height === 0) {
-        halfStrokeWidth = 0;
-    } else {
-        halfStrokeWidth = findLargestStrokeWidth(svgTag) / 2;
-    }
-    const width = bbox.width + (halfStrokeWidth * 2);
-    const height = bbox.height + (halfStrokeWidth * 2);
-    const x = bbox.x - halfStrokeWidth;
-    const y = bbox.y - halfStrokeWidth;
+    return measureSvgBBox(sanitizedValue).then(bbox => {
+        // Enlarge the bbox from the largest found stroke width
+        // This may have false-positives, but at least the bbox will always
+        // contain the full graphic including strokes.
+        // If the width or height is zero however, don't enlarge since
+        // they won't have a stroke width that needs to be enlarged.
+        let halfStrokeWidth;
+        if (bbox.width === 0 || bbox.height === 0) {
+            halfStrokeWidth = 0;
+        } else {
+            halfStrokeWidth = findLargestStrokeWidth(svgTag) / 2;
+        }
+        const width = bbox.width + (halfStrokeWidth * 2);
+        const height = bbox.height + (halfStrokeWidth * 2);
+        const x = bbox.x - halfStrokeWidth;
+        const y = bbox.y - halfStrokeWidth;
 
-    // Set the correct measurements on the SVG tag
-    svgTag.setAttribute('width', width);
-    svgTag.setAttribute('height', height);
-    svgTag.setAttribute('viewBox',
-        `${x} ${y} ${width} ${height}`);
+        // Set the correct measurements on the SVG tag
+        svgTag.setAttribute('width', width);
+        svgTag.setAttribute('height', height);
+        svgTag.setAttribute('viewBox',
+            `${x} ${y} ${width} ${height}`);
+    });
 };
 
 /**
@@ -284,6 +302,7 @@ const setGradientStrokeRoundedness = svgTag => {
  * mimic Scratch 2.0's SVG rendering.
  * @param {SVGSvgElement} svgTag root SVG node to operate upon
  * @param {boolean} [fromVersion2] True if we should perform conversion from version 2 to version 3 svg.
+ * @returns {Promise} - an empty promise which resolves after svgTag has been normalized
  */
 const normalizeSvg = (svgTag, fromVersion2) => {
     if (fromVersion2) {
@@ -298,24 +317,26 @@ const normalizeSvg = (svgTag, fromVersion2) => {
     if (fromVersion2) {
         // Transform all text elements.
         transformText(svgTag);
-        // Transform measurements.
-        transformMeasurements(svgTag);
         // Fix stroke roundedness.
         setGradientStrokeRoundedness(svgTag);
+        // Transform measurements.
+        return transformMeasurements(svgTag);
     } else if (!svgTag.getAttribute('viewBox')) {
         // Renderer expects a view box.
-        transformMeasurements(svgTag);
+        return transformMeasurements(svgTag);
     } else if (!svgTag.getAttribute('width') || !svgTag.getAttribute('height')) {
         svgTag.setAttribute('width', svgTag.viewBox.baseVal.width);
         svgTag.setAttribute('height', svgTag.viewBox.baseVal.height);
     }
+    // there were no fixups necessary OR fixups were completed synchronously
+    return Promise.resolve(svgTag);
 };
 
 /**
  * Load an SVG string and normalize it. All the steps before drawing/measuring.
  * @param {!string} svgString String of SVG data to draw in quirks-mode.
  * @param {?boolean} fromVersion2 True if we should perform conversion from version 2 to version 3 svg.
- * @return {SVGSVGElement} The normalized SVG element.
+ * @return {Promise.<SVGSVGElement>} The normalized SVG element.
  */
 const loadSvgString = (svgString, fromVersion2) => {
     // Parse string into SVG XML.
@@ -327,8 +348,8 @@ const loadSvgString = (svgString, fromVersion2) => {
         throw new Error('Document does not appear to be SVG.');
     }
     const svgTag = svgDom.documentElement;
-    normalizeSvg(svgTag, fromVersion2);
-    return svgTag;
+    return normalizeSvg(svgTag, fromVersion2)
+        .then(() => svgTag);
 };
 
 module.exports = loadSvgString;
