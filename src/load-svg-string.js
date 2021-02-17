@@ -4,6 +4,8 @@ const convertFonts = require('./font-converter');
 const fixupSvgString = require('./fixup-svg-string');
 const transformStrokeWidths = require('./transform-applier');
 
+const iframeSourcePath = require('!file-loader!./measure-svg-bbox.html');
+
 /**
  * @param {SVGElement} svgTag the tag to search within
  * @param {string} [tagName] svg tag to search for (or collect all elements if not given)
@@ -187,37 +189,109 @@ const findLargestStrokeWidth = rootNode => {
     return largestStrokeWidth;
 };
 
-const measureSvgBBox = svgText => new Promise((resolve, reject) => {
+/**
+ * Wrap an iframe element, creating it on demand.
+ */
+class IframeWrapper {
+    /**
+     *
+     * @param {function} iframeSetupCallback - this function will be called on the iframe element at creation time.
+     *   - The function MUST set the 'src' of the iframe.
+     *   - The function MAY set other attributes, such as 'sandbox'
+     *   - The function MUST NOT override or rely on the 'onload' event handler
+     */
+    constructor (iframeSetupCallback) {
+        /**
+         * @type {Promise.<HTMLIFrameElement>}
+         */
+        this._iframePromise = null;
+
+        /**
+         * @type {function}
+         */
+        this._iframeSetupCallback = iframeSetupCallback;
+    }
+
+    /**
+     * Retrieve the wrapped iframe element.
+     * If the iframe doesn't exist, create it and wait for it to load before resolving the promise.
+     * @returns {Promise.<HTMLIFrameElement>} - a promise for the wrapped iframe element. Resolves with 'onload' event.
+     */
+    get () {
+        if (!this._iframePromise) {
+            this._iframePromise = new Promise((resolve, reject) => {
+                const iframeElement = document.createElement('iframe');
+                this._iframeSetupCallback(iframeElement);
+                const timeout = setTimeout(() => {
+                    reject(new Error('Timed out loading iframe'));
+                }, 5 * 1000);
+                iframeElement.onerror = e => {
+                    clearTimeout(timeout);
+                    reject(e);
+                };
+                iframeElement.onload = () => {
+                    clearTimeout(timeout);
+                    resolve(iframeElement);
+                };
+            });
+        }
+
+        return this._iframePromise;
+    }
+}
+
+const pendingMeasurementRequests = {};
+const measureResponseHandler = event => {
+    const promiseCallbacks = pendingMeasurementRequests[event.data.measureSvgTicket];
+    if (promiseCallbacks) {
+        // This is a wrapped resolve() which also removes the pending request entry. See below.
+        promiseCallbacks.resolve(event.data.bbox);
+    }
+};
+
+const iframeWrapper = new IframeWrapper(el => {
+    el.setAttribute('sandbox', 'allow-scripts');
+    el.setAttribute('style', 'position: absolute; bottom: 200%; visibility: hidden');
+
+    // If we ever add code to remove / recreate the iframe we'll need to remove / readd this handler too.
+    window.addEventListener('message', event => {
+        if (event.source === el.contentWindow) {
+            return measureResponseHandler(event);
+        }
+    });
+
+    el.src = iframeSourcePath;
+    document.body.appendChild(el);
+});
+let nextMeasureTicket = 0;
+
+const measureSvgBBox = svgText => iframeWrapper.get().then(iframeElement => new Promise((resolve, reject) => {
     // Append the SVG dom to the document.
     // This allows us to use `getBBox` on the page,
     // which returns the full bounding-box of all drawn SVG
     // elements, similar to how Scratch 2.0 did measurement.
-    const iframeElement = document.createElement('iframe');
-    iframeElement.setAttribute('sandbox', 'allow-same-origin');
-    iframeElement.setAttribute('style', 'position: absolute; top: -100000px');
-
-    try {
-        // eslint-disable-next-line no-undef
-        const svgBlob = new Blob([svgText], {type: 'image/svg+xml'});
-        const iframeContent = URL.createObjectURL(svgBlob);
-        let timeout = null;
-        iframeElement.onload = () => {
+    const myMeasureTicket = nextMeasureTicket++;
+    const timeout = setTimeout(() => {
+        delete pendingMeasurementRequests[myMeasureTicket];
+        reject(new Error('Timed out loading SVG'));
+    }, 10 * 1000);
+    pendingMeasurementRequests[myMeasureTicket] = {
+        reject: e => {
             clearTimeout(timeout);
-            const bbox = iframeElement.getSVGDocument().children[0].getBBox();
+            delete pendingMeasurementRequests[myMeasureTicket];
+            reject(e);
+        },
+        resolve: bbox => {
+            clearTimeout(timeout);
+            delete pendingMeasurementRequests[myMeasureTicket];
             resolve(bbox);
-            document.body.removeChild(iframeElement);
-        };
-        iframeElement.src = iframeContent;
-        document.body.appendChild(iframeElement);
-        timeout = setTimeout(() => {
-            reject(new Error('Timed out loading SVG'));
-            document.body.removeChild(iframeElement);
-        }, 30 * 1000);
-    } catch (e) {
-        reject(e);
-        document.body.removeChild(iframeElement);
-    }
-});
+        }
+    };
+    iframeElement.contentWindow.postMessage({
+        measureSvgTicket: myMeasureTicket,
+        svgText
+    }, '*');
+}));
 
 /**
  * Transform the measurements of the SVG.

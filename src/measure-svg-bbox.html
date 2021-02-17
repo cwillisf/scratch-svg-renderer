@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<body>
+    <title>Scratch SVG measurement helper</title>
+    <span id="svgSpot"></span>
+    <script>
+        var svgSpot = document.getElementById('svgSpot');
+        window.addEventListener('message', function(event) {
+            var parentWindow = event.source;
+            var svgText = event.data.svgText;
+            var ticket = event.data.measureSvgTicket;
+
+            svgSpot.innerHTML = svgText;
+            bbox = svgSpot.children[0].getBBox();
+
+            parentWindow.postMessage({
+                measureSvgTicket: ticket,
+                bbox: {
+                    x: bbox.x,
+                    y: bbox.y,
+                    width: bbox.width,
+                    height: bbox.height
+                }
+            }, '*');
+        });
+    </script>
+</body>
