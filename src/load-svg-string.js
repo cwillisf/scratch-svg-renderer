@@ -224,7 +224,7 @@ class IframeWrapper {
                 this._iframeSetupCallback(iframeElement);
                 const timeout = setTimeout(() => {
                     reject(new Error('Timed out loading iframe'));
-                }, 5 * 1000);
+                }, 15 * 1000);
                 iframeElement.onerror = e => {
                     clearTimeout(timeout);
                     reject(e);
@@ -274,7 +274,7 @@ const measureSvgBBox = svgText => iframeWrapper.get().then(iframeElement => new 
     const timeout = setTimeout(() => {
         delete pendingMeasurementRequests[myMeasureTicket];
         reject(new Error('Timed out loading SVG'));
-    }, 10 * 1000);
+    }, 30 * 1000);
     pendingMeasurementRequests[myMeasureTicket] = {
         reject: e => {
             clearTimeout(timeout);
